@@ -31,22 +31,30 @@ AAuth is a lightweight, flexible authentication system designed as a generic alt
 
 ### Authentication Alternatives Provided
 
-1. **API Key Authentication**
+1. **Passwordless 2FA Authentication** ⭐ **NEW**
+   - No passwords required - username + email + 2FA codes only
+   - Privacy-first design - data tied to username, useless without email mapping
+   - Automatic 2FA code generation and delivery
+   - Quantum-ready cryptography support
+   - Eliminates password recovery complexity
+   - Enhanced security through 2FA-only authentication
+
+2. **API Key Authentication**
    - Simple API key-based access
    - Suitable for service-to-service communication
    - Easy to implement and manage
 
-2. **JWT Token Authentication**
+3. **JWT Token Authentication**
    - Stateless authentication
    - Configurable expiration times
    - Suitable for web and mobile applications
 
-3. **Session-Based Authentication**
+4. **Session-Based Authentication**
    - Traditional cookie-based sessions
    - Server-side session storage
    - Good for web applications
 
-4. **Basic Authentication**
+5. **Basic Authentication**
    - Username/password over HTTPS
    - Simple implementation
    - Suitable for internal tools
@@ -66,16 +74,23 @@ AAuth is a lightweight, flexible authentication system designed as a generic alt
 ```python
 from aauth import AAuth, AuthMethod
 
-# Initialize AAuth with desired method
+# Traditional JWT Authentication
 auth = AAuth(method=AuthMethod.JWT)
+user = auth.register("username", "email@example.com", "password123")
+token = auth.authenticate("username", "password123")
+user_data = auth.verify_token(token)
 
-# Register a user
-user = auth.register("username", "password", "email@example.com")
+# NEW: Passwordless 2FA Authentication
+auth = AAuth(method=AuthMethod.PASSWORDLESS_2FA)
 
-# Authenticate
-token = auth.authenticate("username", "password")
+# Register without password
+user = auth.register("username", "email@example.com")
 
-# Verify token
+# Authenticate - sends 2FA code to email
+result = auth.authenticate("username")  # {"status": "2fa_code_sent", ...}
+
+# Complete authentication with 2FA code
+token = auth.authenticate("username", code_2fa="123456")
 user_data = auth.verify_token(token)
 ```
 
@@ -102,9 +117,13 @@ AAUTH_CONFIG = {
 ### Documentation
 
 - [Installation Guide](docs/installation.md)
+- [Passwordless Authentication Guide](docs/passwordless-authentication.md) ⭐ **NEW**
 - [API Reference](docs/api.md)
 - [Configuration Options](docs/configuration.md)
 - [Examples](examples/)
+  - [Passwordless Usage Example](examples/passwordless_usage.py) ⭐ **NEW**
+  - [Basic Usage Example](examples/basic_usage.py)
+  - [Method Comparison](examples/method_comparison.py)
 - [Migration from OAuth](docs/oauth-migration.md)
 
 ### Contributing

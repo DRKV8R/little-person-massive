@@ -14,6 +14,7 @@ class AuthMethod(Enum):
     BASIC = "basic"
     MFA = "mfa"
     SOCIAL = "social"
+    PASSWORDLESS_2FA = "passwordless_2fa"
 
 
 class TokenType(Enum):

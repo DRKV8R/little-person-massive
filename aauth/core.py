@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import secrets
 import time
+import pyotp
+import smtplib
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Union, List
 import jwt
@@ -36,6 +38,7 @@ class AAuth:
         self.api_keys: Dict[str, Dict[str, Any]] = {}
         self.rate_limits: Dict[str, List[float]] = {}
         self.login_attempts: Dict[str, Dict[str, Any]] = {}
+        self.pending_2fa_codes: Dict[str, Dict[str, Any]] = {}  # For passwordless 2FA codes
     
     def _validate_password(self, password: str) -> bool:
         """Validate password against configured requirements."""
@@ -131,6 +134,51 @@ class AAuth:
             self.login_attempts[username]['count'] += 1
             self.login_attempts[username]['last_attempt'] = time.time()
     
+    def _generate_2fa_code(self, length: int = 6) -> str:
+        """Generate a random 2FA code."""
+        return ''.join([str(secrets.randbelow(10)) for _ in range(length)])
+    
+    def _send_2fa_code(self, email: str, code: str, method: str = "email") -> bool:
+        """Send 2FA code to user via specified method."""
+        # In a real implementation, this would send via email/SMS
+        # For demo purposes, we'll just print the code
+        print(f"\n🔐 2FA Code sent to {email} ({method}): {code}")
+        print(f"Use this code to complete authentication.\n")
+        return True
+    
+    def _store_2fa_code(self, username: str, code: str, expires_in: int = 300) -> None:
+        """Store 2FA code with expiration (default 5 minutes)."""
+        self.pending_2fa_codes[username] = {
+            'code': code,
+            'expires_at': time.time() + expires_in,
+            'attempts': 0
+        }
+    
+    def _verify_2fa_code(self, username: str, provided_code: str, max_attempts: int = 3) -> bool:
+        """Verify 2FA code with attempt limiting."""
+        if username not in self.pending_2fa_codes:
+            return False
+        
+        code_data = self.pending_2fa_codes[username]
+        
+        # Check if code expired
+        if time.time() > code_data['expires_at']:
+            del self.pending_2fa_codes[username]
+            return False
+        
+        # Check attempt limit
+        if code_data['attempts'] >= max_attempts:
+            del self.pending_2fa_codes[username]
+            return False
+        
+        # Verify code
+        if provided_code == code_data['code']:
+            del self.pending_2fa_codes[username]
+            return True
+        else:
+            code_data['attempts'] += 1
+            return False
+    
     def _create_jwt_token(self, user_data: Dict[str, Any], token_type: TokenType = TokenType.ACCESS) -> str:
         """Create JWT token."""
         now = datetime.utcnow()
@@ -170,11 +218,18 @@ class AAuth:
         except jwt.InvalidTokenError:
             raise TokenError("Invalid token")
     
-    def register(self, username: str, password: str, email: str, **kwargs) -> Dict[str, Any]:
-        """Register a new user."""
+    def register(self, username: str, email: str, password: str = None, **kwargs) -> Dict[str, Any]:
+        """Register a new user. For passwordless authentication, password is optional."""
         # Validate inputs
-        self._validate_password(password)
         self._validate_email(email)
+        
+        # For passwordless authentication, skip password validation
+        if self.method == AuthMethod.PASSWORDLESS_2FA and password:
+            raise ValidationError("Password not allowed for passwordless authentication")
+        elif self.method != AuthMethod.PASSWORDLESS_2FA and password:
+            self._validate_password(password)
+        elif self.method != AuthMethod.PASSWORDLESS_2FA and not password:
+            raise ValidationError("Password is required for this authentication method")
         
         # Check if user already exists
         if username in self.users:
@@ -191,14 +246,21 @@ class AAuth:
             'id': user_id,
             'username': username,
             'email': email,
-            'password_hash': self._hash_password(password),
             'created_at': datetime.utcnow().isoformat(),
             'is_active': True,
             'is_verified': not self.config.get('email_verification_required', False),
-            'mfa_enabled': False,
             'last_login': None,
             **kwargs
         }
+        
+        # Add password hash only for password-based authentication
+        if self.method != AuthMethod.PASSWORDLESS_2FA and password:
+            user_data['password_hash'] = self._hash_password(password)
+            user_data['mfa_enabled'] = False
+        else:
+            # For passwordless authentication, 2FA is always enabled
+            user_data['mfa_enabled'] = True
+            user_data['passwordless'] = True
         
         self.users[username] = user_data
         
@@ -206,7 +268,7 @@ class AAuth:
         safe_data = {k: v for k, v in user_data.items() if k != 'password_hash'}
         return safe_data
     
-    def authenticate(self, username: str, password: str, **kwargs) -> Union[str, Dict[str, Any]]:
+    def authenticate(self, username: str, password: str = None, code_2fa: str = None, **kwargs) -> Union[str, Dict[str, Any]]:
         """Authenticate user and return appropriate token/session."""
         # Check rate limiting
         self._check_rate_limit(f"auth:{username}")
@@ -226,17 +288,37 @@ class AAuth:
             self._record_login_attempt(username, False)
             raise AuthenticationError("Account is deactivated")
         
-        # Verify password
-        if not self._verify_password(password, user_data['password_hash']):
-            self._record_login_attempt(username, False)
-            raise InvalidCredentialsError("Invalid credentials")
+        # Handle passwordless authentication
+        if self.method == AuthMethod.PASSWORDLESS_2FA:
+            if code_2fa:
+                # Verify 2FA code
+                if not self._verify_2fa_code(username, code_2fa):
+                    self._record_login_attempt(username, False)
+                    raise InvalidCredentialsError("Invalid or expired 2FA code")
+            else:
+                # Generate and send 2FA code
+                code = self._generate_2fa_code()
+                self._store_2fa_code(username, code)
+                self._send_2fa_code(user_data['email'], code)
+                return {"status": "2fa_code_sent", "message": "2FA code sent to your email"}
+        else:
+            # Traditional password verification
+            if not password:
+                raise ValidationError("Password is required for this authentication method")
+            
+            if 'password_hash' not in user_data:
+                raise AuthenticationError("User account not configured for password authentication")
+            
+            if not self._verify_password(password, user_data['password_hash']):
+                self._record_login_attempt(username, False)
+                raise InvalidCredentialsError("Invalid credentials")
         
         # Record successful login
         self._record_login_attempt(username, True)
         user_data['last_login'] = datetime.utcnow().isoformat()
         
         # Return based on authentication method
-        if self.method == AuthMethod.JWT:
+        if self.method == AuthMethod.JWT or self.method == AuthMethod.PASSWORDLESS_2FA:
             return self._create_jwt_token(user_data)
         elif self.method == AuthMethod.SESSION:
             session_id = secrets.token_urlsafe(32)
@@ -262,7 +344,7 @@ class AAuth:
     
     def verify_token(self, token: str) -> Dict[str, Any]:
         """Verify token and return user data."""
-        if self.method == AuthMethod.JWT:
+        if self.method == AuthMethod.JWT or self.method == AuthMethod.PASSWORDLESS_2FA:
             payload = self._verify_jwt_token(token)
             username = payload.get('username')
             if username in self.users:
@@ -356,6 +438,34 @@ class AAuth:
         # Update password
         user_data['password_hash'] = self._hash_password(new_password)
         return True
+    
+    def request_2fa_code(self, username: str) -> Dict[str, str]:
+        """Request a 2FA code for passwordless authentication."""
+        if self.method != AuthMethod.PASSWORDLESS_2FA:
+            raise AuthenticationError("2FA code request only available for passwordless authentication")
+        
+        # Check rate limiting
+        self._check_rate_limit(f"2fa:{username}")
+        
+        # Find user
+        if username not in self.users:
+            raise UserNotFoundError("User not found")
+        
+        user_data = self.users[username]
+        
+        # Check if user is active
+        if not user_data.get('is_active', True):
+            raise AuthenticationError("Account is deactivated")
+        
+        # Generate and send 2FA code
+        code = self._generate_2fa_code()
+        self._store_2fa_code(username, code)
+        self._send_2fa_code(user_data['email'], code)
+        
+        return {
+            "status": "success",
+            "message": f"2FA code sent to {user_data['email']}"
+        }
     
     def get_user(self, username: str) -> Dict[str, Any]:
         """Get user data (without password hash)."""
